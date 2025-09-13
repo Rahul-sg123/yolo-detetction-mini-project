@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>People Counter</title>
+</head>
+<body>
+    <h1>Temple People Counter</h1>
+    
+    <form id="uploadForm" enctype="multipart/form-data">
+        <input type="file" id="videoFile" accept="video/*" required>
+        <button type="submit">Count People</button>
+    </form>
+    
+    <div id="results" style="display:none;">
+        <h3>Results:</h3>
+        <p>People detected: <span id="peopleCount"></span></p>
+    </div>
+    
+    <script>
+        document.getElementById('uploadForm').onsubmit = function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData();
+            const fileInput = document.getElementById('videoFile');
+            formData.append('video', fileInput.files[0]);
+            
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.getElementById('peopleCount').textContent = data.people_count;
+                    document.getElementById('results').style.display = 'block';
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            });
+        };
+    </script>
+</body>
+</html>
