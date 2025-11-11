@@ -1,5 +1,6 @@
 import cv2
 import os
+import math
 import time
 import numpy as np
 from ultralytics import YOLO
@@ -379,3 +380,46 @@ def get_video_statistics(video_path):
     
     STATS_STORE[filename].update(final_stats)
     return final_stats
+
+def calculate_wait_time(people_count, processing_rate=2.0):
+    """
+    Return wait time in minutes as a float with one decimal place.
+    Example: 2 people with rate 2.0 -> 1.0, 1 person -> 0.5 (rounded to 0.5 -> 0.5)
+    """
+    if people_count <= 0:
+        return 0.0
+    wait = people_count / float(processing_rate)
+    # Round to one decimal for chart granularity (0.1 steps)
+    return round(wait, 1)
+
+def update_stats(frame_detections, video_filename):
+    """Update statistics based on current frame detections"""
+    if video_filename not in STATS_STORE:
+        STATS_STORE[video_filename] = {
+            'people_count': 0,
+            'wait_time': 0.0,
+            'processing_rate': 2.0,  # default rate (people per minute)
+            'accuracy': 95.0,
+            'avg_speed': 0.2,
+            'last_update': time.time()
+        }
+
+    # Count people with confidence > 0.5 (adjust index if your detection format differs)
+    current_count = len([d for d in frame_detections if d[5] > 0.5])
+
+    # Optionally smooth people count (simple exponential smoothing)
+    alpha = 0.35
+    prev = STATS_STORE[video_filename].get('people_count', 0)
+    smoothed = int(round(alpha * current_count + (1 - alpha) * prev))
+
+    processing_rate = STATS_STORE[video_filename].get('processing_rate', 2.0)
+    wait_time = calculate_wait_time(smoothed, processing_rate)
+
+    STATS_STORE[video_filename].update({
+        'people_count': smoothed,
+        'wait_time': wait_time,   # float (one decimal)
+        'processing_rate': processing_rate,
+        'last_update': time.time()
+    })
+
+    return STATS_STORE[video_filename]

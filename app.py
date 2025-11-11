@@ -1,8 +1,10 @@
 import os
 import time
 import json
+import math
 import sqlite3
 import threading
+from datetime import datetime
 from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 from video_processor import generate_processed_video, get_video_statistics, STATS_STORE
 
@@ -24,7 +26,7 @@ def init_db():
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS queue_stats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                timestamp TEXT,
                 people_count INTEGER,
                 wait_time REAL
             )
@@ -36,30 +38,37 @@ def init_db():
         print(f"Error initializing database: {e}")
 
 def log_stats_periodically():
-    """A background thread function to log stats to the DB."""
+    """Background thread: write float wait_time to DB"""
     while True:
         try:
-            # Wait for 15 seconds before logging
-            time.sleep(15)
-            
-            # Check if the stats store has data for our default video
+            time.sleep(5)
             if DEFAULT_VIDEO_FILENAME in STATS_STORE:
                 stats = STATS_STORE[DEFAULT_VIDEO_FILENAME]
-                
-                # Only log if there are people, to avoid empty charts
-                if stats.get('people_count', 0) > 0:
-                    conn = sqlite3.connect(DB_FILE)
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO queue_stats (people_count, wait_time)
-                        VALUES (?, ?)
-                    """, (stats['people_count'], stats['wait_time']))
-                    conn.commit()
-                    conn.close()
-                    print(f"Logged to DB: {stats['people_count']} people, {stats['wait_time']} min wait")
-                    
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                people_count = int(stats.get('people_count', 0))
+                processing_rate = float(stats.get('processing_rate', 2.0))
+                wait_time = 0.0 if people_count == 0 else round(people_count / processing_rate, 1)
+
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO queue_stats (timestamp, people_count, wait_time)
+                    VALUES (?, ?, ?)
+                """, (current_time, people_count, wait_time))
+                # keep last 1000 rows
+                cursor.execute("""
+                    DELETE FROM queue_stats 
+                    WHERE id NOT IN (
+                        SELECT id FROM queue_stats 
+                        ORDER BY id DESC 
+                        LIMIT 1000
+                    )
+                """)
+                conn.commit()
+                conn.close()
         except Exception as e:
             print(f"Error in logging thread: {e}")
+            time.sleep(1)
 
 # --- END: Database Setup ---
 
@@ -68,32 +77,32 @@ def log_stats_periodically():
 def index():
     return render_template('index.html', default_video=DEFAULT_VIDEO_FILENAME)
 
-# --- NEW: History API Endpoint ---
 @app.route('/history')
 def get_history():
-    """Returns the last 200 data points as JSON for charting."""
+    """Return history with wait_time as float for chart consumption."""
     try:
         conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row # This lets us get columns by name
+        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        
-        # Get the most recent 200 entries, oldest first
         cursor.execute("""
             SELECT timestamp, people_count, wait_time
             FROM queue_stats
-            ORDER BY timestamp DESC
+            ORDER BY id DESC
             LIMIT 200
         """)
         rows = cursor.fetchall()
         conn.close()
-        
-        # Convert sqlite3.Row objects to standard dicts
-        history_data = [dict(row) for row in reversed(rows)] # reversed() to get chronological order
-        
-        return jsonify(history_data)
+        history = []
+        for r in reversed(rows):
+            history.append({
+                'timestamp': r['timestamp'],
+                'people_count': int(r['people_count']),
+                'wait_time': float(r['wait_time']) if r['wait_time'] is not None else 0.0
+            })
+        return jsonify(history)
     except Exception as e:
         print(f"Error fetching history: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Failed to fetch history data"}), 500
 # --- END: History API Endpoint ---
 
 @app.route('/video_feed/<filename>')
@@ -109,14 +118,28 @@ def video_feed(filename):
         return jsonify({'error': f'Processing error: {e}'}), 500
 
 @app.route('/current_stats/<filename>')
-def current_stats(filename):
-    """Return the latest stats."""
-    if filename not in STATS_STORE:
-        return jsonify({'success': False, 'error': 'Stats not ready yet'}), 404
-    
-    s = STATS_STORE.get(filename, {}).copy()
-    s['success'] = True
-    return jsonify(s)
+def get_current_stats(filename):
+    """Return current stats; ensure wait_time is a float with one decimal."""
+    try:
+        if filename in STATS_STORE:
+            stats = STATS_STORE[filename]
+            people_count = int(stats.get('people_count', 0))
+            processing_rate = float(stats.get('processing_rate', 2.0))
+            # calculate float wait_time (consistent with video_processor)
+            wait_time = 0.0 if people_count == 0 else round(people_count / processing_rate, 1)
+
+            return jsonify({
+                'success': True,
+                'people_count': people_count,
+                'wait_time': wait_time,          # float (e.g. 0.5, 1.0)
+                'accuracy': stats.get('accuracy', 'N/A'),
+                'avg_speed': stats.get('avg_speed', 0),
+                'last_update': stats.get('last_update', time.time())
+            })
+        return jsonify({'success': False, 'error': 'No stats available'})
+    except Exception as e:
+        print(f"Error in get_current_stats: {e}")
+        return jsonify({'success': False, 'error': 'internal error'}), 500
 
 # --- LEGACY ROUTES (unchanged) ---
 @app.route('/process_video/<filename>', methods=['POST'])
